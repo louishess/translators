@@ -2,14 +2,14 @@
 	"translatorID": "938ebe32-2b2e-4349-a5b3-b3a05d3de627",
 	"label": "ACS Publications",
 	"creator": "Sean Takats, Michael Berkowitz, Santawort, and Aurimas Vinckevicius",
-	"target": "^https?://pubs\\.acs\\.org/(toc/|journal/|topic/|isbn/\\d|doi/(full/|abs/|epdf/|book/)?10\\.|action/(doSearch\\?|showCitFormats\\?.*doi))",
+	"target": "^https?://pubs\\.acs\\.org/(toc/|journal/|topic/|isbn/\\d|doi/(full/|abs/|epdf/|book/)?10\\.|action/(doSearch\\?|showCitFormats\\?.*doi)|[^/?#]+/(article(-abstract|-split)?|issue)(/|$))",
 	"minVersion": "4.0.5",
 	"maxVersion": "",
 	"priority": 100,
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2024-09-30 13:50:18"
+	"lastUpdated": "2026-08-08 15:09:54"
 }
 
 /*
@@ -38,13 +38,19 @@
 
 function getSearchResults(doc, checkOnly) {
 	var items = {}, found = false;
-	var rows = doc.querySelectorAll('.issue-item_title a, .teaser_title a');
+	var rows = doc.querySelectorAll([
+		'.issue-item_title a',
+		'.teaser_title a',
+		'#ArticleList h5.item-title > a',
+		'.al-title a[href*="/article"]',
+		'.al-article-items > .customLink > a[href*="/article"]'
+	].join(', '));
 	for (let i = 0; i < rows.length; i++) {
 		var href = rows[i].href;
-		var title = ZU.trimInternal(rows[i].textContent);
+		var title = ZU.trimInternal(text(rows[i], '.access-title') || rows[i].textContent);
 		if (!href || !title) continue;
-		var doi = getDoi(href);
-		if (!doi) continue;
+		let path = new URL(href).pathname;
+		if (!getDoi(href) && !/\/article(?:-abstract|-split)?\//.test(path)) continue;
 		if (checkOnly) return true;
 		found = true;
 		items[href] = title;
@@ -53,9 +59,13 @@ function getSearchResults(doc, checkOnly) {
 	return found ? items : false;
 }
 
-// Return the DOI indicated by the URL, or null when no DOI is found
-// The input should be a properly encoded URL
-function getDoi(url) {
+// Return the DOI indicated by the page metadata or URL, or null when no DOI is found.
+// The URL should be properly encoded.
+function getDoi(url, doc) {
+	let metaDOI = doc && attr(doc, 'meta[name="citation_doi"]', 'content');
+	if (metaDOI) {
+		return metaDOI.trim().replace(/^doi:\s*/i, '');
+	}
 	let urlObj = new URL(url);
 	let doi = decodeURIComponent(urlObj.pathname).match(/^\/doi\/(?:.+\/)?(10\.\d{4,}\/.+)$/);
 	if (doi) {
@@ -65,6 +75,12 @@ function getDoi(url) {
 		doi = urlObj.searchParams.get("doi");
 	}
 	return doi;
+}
+
+function isSilverchairArticle(doc, url) {
+	let pageURL = doc && doc.location && doc.location.href || url;
+	return /\/[^/]+\/article(?:-abstract|-split)?\//.test(new URL(pageURL).pathname)
+		&& Boolean(getDoi(pageURL, doc));
 }
 
 /** ***************************
@@ -81,22 +97,29 @@ var suppTypeMap = {
 	doc: 'application/msword',
 	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 	xls: 'application/vnd.ms-excel',
-	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	mp4: 'video/mp4'
 };
 
 function getSupplements(doc, supplementAsLink = false) {
 	let supplements = [];
-	// Note that the lists of supplements are duplicated in the main
-	// content side and right-side panel (if any). We want to confine it to
-	// one (or the only) side in order to avoid having to deduplicate.
-	let supplementLinks = doc.querySelectorAll(".article_content-left .suppl-anchor");
+	let seenURLs = new Set();
+	let supplementLinks = doc.querySelectorAll([
+		'a[data-doctype="dataSupplementDoc"][href]',
+		'.article_content-left .suppl-anchor[href]'
+	].join(', '));
 	for (let i = 0; i < supplementLinks.length; i++) {
 		let elem = supplementLinks[i];
 		let url = elem.href;
-		if (!url) continue;
-		let pathComponents = url.replace(/[?#].+$/, "").split(".");
-		// possible location of file extension (following the last dot)
-		let ext = pathComponents[pathComponents.length - 1].toLowerCase();
+		if (!url || seenURLs.has(url)) continue;
+		seenURLs.add(url);
+
+		let pathname = new URL(url).pathname;
+		let formatMatch = pathname.match(/\/article-supplement\/[^/]+\/([^/]+)\//);
+		let extensionMatch = pathname.match(/\.([^.\/]+)$/);
+		let ext = (formatMatch && formatMatch[1]
+			|| extensionMatch && extensionMatch[1]
+			|| '').toLowerCase();
 		let mimeType = suppTypeMap[ext];
 		// Only save file when MIME type is known *and* when we aren't
 		// specifically told otherwise
@@ -105,7 +128,7 @@ function getSupplements(doc, supplementAsLink = false) {
 		// substantially long, while the filename is redundant (and it doesn't
 		// inform the user that the file is meant to be a supplement). We
 		// simply number them in the order they appear.
-		let title = `Supplement ${i + 1}`;
+		let title = `Supplement ${supplements.length + 1}`;
 		let attachment = { title, url, snapshot };
 		if (mimeType) attachment.mimeType = mimeType;
 		supplements.push(attachment);
@@ -118,6 +141,9 @@ function getSupplements(doc, supplementAsLink = false) {
  ***************************/
 
 function detectWeb(doc, url) {
+	if (isSilverchairArticle(doc, url)) {
+		return "journalArticle";
+	}
 	if (getSearchResults(doc, true)) {
 		return "multiple";
 	}
@@ -163,13 +189,6 @@ function cleanNumberField(item, field) {
 	}
 }
 
-// In most cases the URL contains the DOI which is sufficient for obtaining the
-// RIS, so there's no need to download the document if it's not already there.
-// But when supplements as attachments are desired, we need the actual document
-// for the supplement links. Our convention here is to pass falsy as the "doc"
-// argument when supplements are not requested, and the actual doc (maybe
-// fetched by us) when we want the supplements.
-
 async function doWeb(doc, url) {
 	let attachSupplement = false;
 	let supplementAsLink = false;
@@ -183,17 +202,17 @@ async function doWeb(doc, url) {
 		let items = await Z.selectItems(getSearchResults(doc));
 		if (!items) return;
 		for (let url of Object.keys(items)) {
-			await scrape(
-				attachSupplement && await requestDocument(url),
-				url,
-				supplementAsLink
-			);
+			let articleDoc = attachSupplement || /\/article(?:-abstract|-split)?\//.test(new URL(url).pathname)
+				? await requestDocument(url)
+				: null;
+			await scrape(articleDoc, url, { attachSupplement, supplementAsLink });
 			await delay(500);
 		}
 	}
 	else {
 		// single article
-		await scrape(attachSupplement && doc, url, supplementAsLink);
+		let articleDoc = isSilverchairArticle(doc, url) || attachSupplement ? doc : null;
+		await scrape(articleDoc, url, { attachSupplement, supplementAsLink });
 	}
 }
 
@@ -201,8 +220,47 @@ function delay(milliseconds) {
 	return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-async function scrape(doc, url, supplementAsLink) {
-	let doi = getDoi(url);
+async function scrape(doc, url, options) {
+	if (isSilverchairArticle(doc, url)) {
+		await scrapeSilverchair(doc, url, options);
+		return;
+	}
+	await scrapeLegacy(doc, url, options);
+}
+
+async function scrapeSilverchair(doc, url, options) {
+	let pageURL = doc.location && doc.location.href || url;
+	let doi = getDoi(pageURL, doc);
+	let pdfURL = attr(doc, 'meta[name="citation_pdf_url"]', 'content');
+
+	let translator = Zotero.loadTranslator('web');
+	// Embedded Metadata. Silverchair's RIS endpoint rejects Connector requests.
+	translator.setTranslator('951c027d-74ac-47d4-a107-9c3069ab7b48');
+	translator.setDocument(doc);
+	translator.setHandler('itemDone', function (obj, item) {
+		item.DOI = doi;
+		item.url = `https://doi.org/${doi}`;
+		item.libraryCatalog = 'ACS Publications';
+		item.attachments = [];
+		if (pdfURL) {
+			item.attachments.push({
+				title: 'Full Text PDF',
+				url: new URL(pdfURL, pageURL).href,
+				mimeType: 'application/pdf'
+			});
+		}
+		if (options.attachSupplement) {
+			item.attachments.push(...getSupplements(doc, options.supplementAsLink));
+		}
+		cleanNumberField(item, 'numberOfVolumes');
+		cleanNumberField(item, 'numPages');
+		item.complete();
+	});
+	await translator.translate();
+}
+
+async function scrapeLegacy(doc, url, options) {
+	let doi = getDoi(url, doc);
 
 	if (doc && /\/action\/showCitFormats\?|\/doi\/epdf\//.test(url)) {
 		// standalone "export citation" page or "epdf viewer", *and*
@@ -257,7 +315,9 @@ async function scrape(doc, url, supplementAsLink) {
 		}
 		// supplements
 		if (doc) {
-			item.attachments.push(...getSupplements(doc, supplementAsLink));
+			if (options.attachSupplement) {
+				item.attachments.push(...getSupplements(doc, options.supplementAsLink));
+			}
 		}
 		// Cleanup fields that may contain invalid numeric values
 		cleanNumberField(item, "numberOfVolumes");
@@ -319,6 +379,11 @@ var testCases = [
 	{
 		"type": "web",
 		"url": "https://pubs.acs.org/toc/nalefd/12/6",
+		"items": "multiple"
+	},
+	{
+		"type": "web",
+		"url": "https://pubs.acs.org/nalefd/issue/12/6",
 		"items": "multiple"
 	},
 	{

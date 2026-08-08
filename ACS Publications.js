@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2026-08-08 15:09:54"
+	"lastUpdated": "2026-08-08 16:45:00"
 }
 
 /*
@@ -101,7 +101,7 @@ var suppTypeMap = {
 	mp4: 'video/mp4'
 };
 
-function getSupplements(doc, supplementAsLink = false) {
+function getPageSupplements(doc, supplementAsLink = false) {
 	let supplements = [];
 	let seenURLs = new Set();
 	let supplementLinks = doc.querySelectorAll([
@@ -134,6 +134,56 @@ function getSupplements(doc, supplementAsLink = false) {
 		supplements.push(attachment);
 	}
 	return supplements;
+}
+
+async function getFigshareSupplements(doi) {
+	let records = await requestJSON('https://api.figshare.com/v2/articles/search', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ resource_doi: doi })
+	});
+	records = records.filter(record => record.resource_doi === doi);
+	records.sort((a, b) => {
+		let aNumber = parseInt((a.doi.match(/\.s(\d+)$/i) || [])[1]) || 0;
+		let bNumber = parseInt((b.doi.match(/\.s(\d+)$/i) || [])[1]) || 0;
+		return aNumber - bNumber;
+	});
+
+	let details = await Promise.all(records.map(record => requestJSON(record.url)));
+	let supplements = [];
+	let seenURLs = new Set();
+	for (let detail of details) {
+		for (let file of detail.files || []) {
+			if (!file.download_url || seenURLs.has(file.download_url)) continue;
+			seenURLs.add(file.download_url);
+			let extension = file.name && file.name.match(/\.([^.]+)$/);
+			let mimeType = file.mimetype
+				|| extension && suppTypeMap[extension[1].toLowerCase()];
+			let attachment = {
+				title: `Supplement ${supplements.length + 1}`,
+				url: file.download_url,
+				snapshot: Boolean(mimeType)
+			};
+			if (mimeType) attachment.mimeType = mimeType;
+			supplements.push(attachment);
+		}
+	}
+	return supplements;
+}
+
+async function getSupplements(doc, doi, supplementAsLink = false) {
+	let pageSupplements = getPageSupplements(doc, supplementAsLink);
+	if (supplementAsLink || !doi) return pageSupplements;
+
+	try {
+		let figshareSupplements = await getFigshareSupplements(doi);
+		if (figshareSupplements.length) return figshareSupplements;
+	}
+	catch (e) {
+		Z.debug(`ACS Publications: Figshare supplementary lookup failed for ${doi}`);
+		Z.debug(e);
+	}
+	return pageSupplements;
 }
 
 /** *************************
@@ -231,7 +281,12 @@ async function scrape(doc, url, options) {
 async function scrapeSilverchair(doc, url, options) {
 	let pageURL = doc.location && doc.location.href || url;
 	let doi = getDoi(pageURL, doc);
-	let pdfURL = attr(doc, 'meta[name="citation_pdf_url"]', 'content');
+	// Keep the established ACS PDF route. It redirects to the current
+	// Silverchair article PDF while retaining the browser's ACS session.
+	let pdfURL = `/doi/pdf/${doi}`;
+	let supplements = options.attachSupplement
+		? await getSupplements(doc, doi, options.supplementAsLink)
+		: [];
 
 	let translator = Zotero.loadTranslator('web');
 	// Embedded Metadata. Silverchair's RIS endpoint rejects Connector requests.
@@ -249,9 +304,7 @@ async function scrapeSilverchair(doc, url, options) {
 				mimeType: 'application/pdf'
 			});
 		}
-		if (options.attachSupplement) {
-			item.attachments.push(...getSupplements(doc, options.supplementAsLink));
-		}
+		item.attachments.push(...supplements);
 		cleanNumberField(item, 'numberOfVolumes');
 		cleanNumberField(item, 'numPages');
 		item.complete();
@@ -269,6 +322,9 @@ async function scrapeLegacy(doc, url, options) {
 		url = `https://pubs.acs.org/doi/${doi}`;
 		doc = await requestDocument(url);
 	}
+	let supplements = doc && options.attachSupplement
+		? await getSupplements(doc, doi, options.supplementAsLink)
+		: [];
 
 	let risURL = new URL("/action/downloadCitation?include=abs&format=ris&direct=true", url);
 	risURL.searchParams.set("doi", doi);
@@ -314,11 +370,7 @@ async function scrapeLegacy(doc, url, options) {
 			});
 		}
 		// supplements
-		if (doc) {
-			if (options.attachSupplement) {
-				item.attachments.push(...getSupplements(doc, options.supplementAsLink));
-			}
-		}
+		item.attachments.push(...supplements);
 		// Cleanup fields that may contain invalid numeric values
 		cleanNumberField(item, "numberOfVolumes");
 		cleanNumberField(item, "numPages");

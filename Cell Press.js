@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2026-08-08 22:07:58"
+	"lastUpdated": "2026-08-08 23:03:00"
 }
 
 /*
@@ -126,6 +126,21 @@ var suppTypeMap = {
 	'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 };
 
+function getElsevierSupplementURL(doc, fileName) {
+	if (!/^mmc\d+\.[a-z0-9]+$/i.test(fileName)) return;
+
+	var pii = ZU.xpathText(doc, '//meta[@name="citation_pii"]/@content');
+	if (!pii && doc.location) {
+		var match = doc.location.href.match(/\/(?:abstract|fulltext)\/(S[^/?#]+)/i);
+		if (match) pii = match[1];
+	}
+	if (!pii) return;
+
+	pii = pii.replace(/[^a-z0-9]/gi, '');
+	if (!/^S\d+$/i.test(pii)) return;
+	return 'https://ars.els-cdn.com/content/image/1-s2.0-' + pii + '-' + fileName;
+}
+
 function getModernSupplementaryAttachments(doc, attachAsLink) {
 	var attachments = [];
 	var seen = {};
@@ -154,9 +169,13 @@ function getModernSupplementaryAttachments(doc, attachAsLink) {
 
 			var extension = fileName && fileName.match(/\.([^.]+)$/);
 			var mimeType = extension && suppTypeMap[extension[1].toLowerCase()];
+			var attachmentURL = link.href;
+			if (!attachAsLink) {
+				attachmentURL = getElsevierSupplementURL(doc, fileName) || attachmentURL;
+			}
 			var attachment = {
 				title: title,
-				url: link.href,
+				url: attachmentURL,
 				snapshot: !!(!attachAsLink && mimeType)
 			};
 			if (mimeType) attachment.mimeType = mimeType;

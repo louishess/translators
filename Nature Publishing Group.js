@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-06-12 16:23:14"
+	"lastUpdated": "2026-08-08 22:07:05"
 }
 
 /**
@@ -35,13 +35,47 @@ var suppTypeMap = {
 	pdf: 'application/pdf',
 	//	'zip': 'application/zip',
 	doc: 'application/msword',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 	xls: 'application/vnd.ms-excel',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 	excel: 'application/vnd.ms-excel'
 };
 
 function attachSupplementary(doc, item, next) {
-	// nature's new website
 	var attachAsLink = Z.getHiddenPref("supplementaryAsLink");
+
+	// current website
+	let links = doc.querySelectorAll(
+		'[data-test="supplementary-info"] [data-test="supp-item"] a[data-test="supp-info-link"][href]'
+	);
+	let attachmentsAdded = 0;
+	for (let i = 0; i < links.length; i++) {
+		let link = links[i];
+		let title = ZU.trimInternal(link.textContent);
+		let fileType = title.match(/\(\s*download\s+([a-z0-9]+)\s*\)\s*$/i);
+		// Extended Data figure pages use the same data-test attributes, but only
+		// actual supplementary files have a download label and direct media URL.
+		if (!fileType
+				|| !/^https:\/\/media\.springernature\.com\/original\//i.test(link.href)) {
+			continue;
+		}
+
+		title = title.replace(/\s*\(\s*download\s+[a-z0-9]+\s*\)\s*$/i, '');
+		let mimeType = suppTypeMap[fileType[1].toLowerCase()];
+		let attachment = {
+			title: title || 'Supplementary file',
+			url: link.href
+		};
+		if (mimeType) attachment.mimeType = mimeType;
+		if (attachAsLink || !mimeType) {
+			attachment.snapshot = false;
+		}
+		item.attachments.push(attachment);
+		attachmentsAdded++;
+	}
+	if (attachmentsAdded) return;
+
+	// previous website
 	var suppDiv = doc.getElementById("supplementary-information");
 	if (suppDiv) {
 		var fileClasses = ZU.xpath(suppDiv, './/div[contains(@class, "supp-info")]/h2');

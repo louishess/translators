@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2017-06-06 22:03:36"
+	"lastUpdated": "2026-08-08 22:07:58"
 }
 
 /*
@@ -87,7 +87,10 @@ function scrape(doc, url) {
 		var abstract = ZU.xpathText(doc, '//div[contains(@class, "abstract")]/div[contains(@class, "content")]/p')
 			item.abstractNote = abstract;
 
-		//fetch direct PDF link (ScienceDirect)
+		// Preserve the PDF supplied by Embedded Metadata. Older versions of this
+		// translator fetched the URL as text to look for obsolete JavaScript
+		// redirects. Current Cell Press PDF endpoints reject that probe, which
+		// prevented the item (and its supplementary files) from being completed.
 		var pdfUrl;
 		for (var i=0, n=item.attachments.length; i<n; i++) {
 			if (item.attachments[i].mimeType &&
@@ -101,28 +104,13 @@ function scrape(doc, url) {
 		}
 		
 		if (pdfUrl) {
-			ZU.doGet(pdfUrl, function(text) {
-				if (text.indexOf('onload="javascript:redirectToScienceURL();"') != -1) {
-					var m = text.match(/value\s*=\s*"([^"]+)"/);
-					if (m) {
-						pdfUrl = m[1];
-					}
-				} else if (text.indexOf('onload="javascript:trackPDFDownload();"') != -1) {
-					pdfUrl += (pdfUrl.indexOf('?') != -1 ? '&' : '?') +
-								'intermediate=true';
-				}
-				
-				item.attachments.push({
-					title: 'Full Text PDF',
-					url: pdfUrl,
-					mimeType: 'application/pdf'
-				});
-				
-				finalize(item, doc, url, pdfUrl);
+			item.attachments.push({
+				title: 'Full Text PDF',
+				url: pdfUrl,
+				mimeType: 'application/pdf'
 			});
-		} else {
-			finalize(item, doc, url, pdfUrl);
 		}
+		finalize(item, doc, url);
 	});
 
 	translator.translate();
@@ -138,9 +126,58 @@ var suppTypeMap = {
 	'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 };
 
-function finalize(item, doc, url, pdfUrl) {
+function getModernSupplementaryAttachments(doc, attachAsLink) {
+	var attachments = [];
+	var seen = {};
+	var containers = [
+		doc.getElementById('supplementary-material'),
+		doc.getElementById('core-collateral-supplementary')
+	];
+
+	for (var i=0; i<containers.length; i++) {
+		if (!containers[i]) continue;
+		var entries = containers[i].querySelectorAll('.core-supplementary-material');
+		for (var j=0; j<entries.length; j++) {
+			var link = entries[j].querySelector('.core-link a[href]');
+			if (!link || !link.href || seen[link.href]) continue;
+			seen[link.href] = true;
+
+			var titleNode = entries[j].querySelector('.core-description');
+			var title = titleNode && ZU.trimInternal(titleNode.textContent);
+			var fileName = link.getAttribute('download')
+				|| link.href.replace(/[?#].*$/, '').split('/').pop();
+			if (!title) {
+				title = fileName
+					|| ZU.trimInternal(link.textContent).replace(/\s*\([^()]+\)\s*$/, '')
+					|| 'Supplementary Data';
+			}
+
+			var extension = fileName && fileName.match(/\.([^.]+)$/);
+			var mimeType = extension && suppTypeMap[extension[1].toLowerCase()];
+			var attachment = {
+				title: title,
+				url: link.href,
+				snapshot: !!(!attachAsLink && mimeType)
+			};
+			if (mimeType) attachment.mimeType = mimeType;
+			attachments.push(attachment);
+		}
+	}
+
+	return attachments;
+}
+
+function finalize(item, doc, url) {
 	if (Z.getHiddenPref && Z.getHiddenPref('attachSupplementary')) {
 		try {
+			var attachAsLink = Z.getHiddenPref('supplementaryAsLink');
+			var attachments = getModernSupplementaryAttachments(doc, attachAsLink);
+			if (attachments.length) {
+				item.attachments = item.attachments.concat(attachments);
+				item.complete();
+				return;
+			}
+
 			//check if there is supplementary data
 			var tabs = doc.getElementById('aotftabs');
 			var suppLink;
@@ -157,7 +194,7 @@ function finalize(item, doc, url, pdfUrl) {
 				suppLink = ZU.xpathText(tabs, './/a[text()="Supplemental Data"]/@href');
 			}
 			if (suppLink) {
-				if (Z.getHiddenPref('supplementaryAsLink')) {
+				if (attachAsLink) {
 					item.attachments.push({
 						title: 'Supplementary Data',
 						url: suppLink,

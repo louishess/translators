@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2025-06-11 15:32:23"
+	"lastUpdated": "2026-08-08 17:45:00"
 }
 
 /*
@@ -62,6 +62,86 @@ function getAuthorName(text) {
 	text = text.replace(/(^|[\s,])(PhD|MA|Prof|Dr)(\.?|(?=\s|$))/gi, '');	// remove salutations
 
 	return fixCase(text.trim());
+}
+
+
+// Keep the download list deliberately conservative. Wiley also uses this
+// endpoint for large archives and media files, which should stay links unless
+// there is an explicit, tested downloader for them.
+var supplementaryMimeTypes = {
+	pdf: 'application/pdf',
+	doc: 'application/msword',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	xls: 'application/vnd.ms-excel',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	csv: 'text/csv',
+	txt: 'text/plain',
+	rtf: 'application/rtf'
+};
+
+
+function getSupplementaryFileName(link) {
+	var match = link.href.match(/[?&]file=([^&#]+)/i);
+	if (match) {
+		try {
+			return decodeURIComponent(match[1]);
+		}
+		catch (e) {
+			return match[1];
+		}
+	}
+
+	return ZU.trimInternal(link.textContent);
+}
+
+
+function getSupplementaryAttachments(doc, attachAsLink) {
+	var attachments = [];
+	var seenURLs = {};
+	var sections = doc.querySelectorAll([
+		// Current Wiley article pages expose a direct file table here.
+		'section.article-section__supporting',
+		// Some Wiley journal templates omit the class but retain the endpoint
+		// advertised on the containing section.
+		'[data-suppl]'
+	].join(', '));
+
+	for (var i = 0; i < sections.length; i++) {
+		var links = sections[i].querySelectorAll('a[href*="/action/downloadSupplement"]');
+		for (var j = 0; j < links.length; j++) {
+			var link = links[j];
+			var url = link.href.replace(/#.*/, '');
+			if (!url || seenURLs[url]) continue;
+			seenURLs[url] = true;
+
+			var fileName = getSupplementaryFileName(link);
+			if (!fileName) continue;
+			var extension = fileName.match(/\.([a-z0-9]+)$/i);
+			var mimeType = extension && supplementaryMimeTypes[extension[1].toLowerCase()];
+			var attachment = {
+				title: fileName,
+				url: url
+			};
+			if (mimeType) attachment.mimeType = mimeType;
+			// Do not ask the Connector to download unknown (often large) formats.
+			if (attachAsLink || !mimeType) attachment.snapshot = false;
+			attachments.push(attachment);
+		}
+	}
+
+	return attachments;
+}
+
+
+function addSupplementaryAttachments(doc, item) {
+	if (!Z.getHiddenPref || !Z.getHiddenPref('attachSupplementary')) return;
+
+	var attachments = getSupplementaryAttachments(
+		doc, Z.getHiddenPref('supplementaryAsLink')
+	);
+	if (attachments.length) {
+		item.attachments = (item.attachments || []).concat(attachments);
+	}
 }
 
 function scrapeBook(doc, url) {
@@ -190,6 +270,7 @@ function scrapeEM(doc, url) {
 				mimeType: 'application/pdf'
 			});
 		}
+		addSupplementaryAttachments(doc, item);
 		item.complete();
 	});
 
@@ -352,6 +433,7 @@ function scrapeBibTeX(doc, url) {
 					mimeType: 'application/pdf'
 				});
 			}
+			addSupplementaryAttachments(doc, item);
 			item.complete();
 		});
 

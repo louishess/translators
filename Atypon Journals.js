@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2022-10-25 02:51:38"
+	"lastUpdated": "2026-08-08 19:40:00"
 }
 
 /*
@@ -222,6 +222,61 @@ function buildPdfUrl(url, root) {
 	return false;
 }
 
+var scienceSupplementaryMimeTypes = {
+	pdf: 'application/pdf',
+	zip: 'application/zip',
+	doc: 'application/msword',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	xls: 'application/vnd.ms-excel',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	csv: 'text/csv',
+	txt: 'text/plain'
+};
+
+function getScienceSupplementaryAttachments(doc, attachAsLink, pageURL) {
+	// Science.org's current Atypon template lists concrete supplementary files
+	// on the article page. Keep this site-specific: other Atypon publishers do
+	// not necessarily use AAAS's `core-*` markup or public download endpoints.
+	pageURL = pageURL || doc.location.href;
+	if (!/^https?:\/\/(?:www\.)?science\.org\//i.test(pageURL)) return [];
+
+	var attachments = [];
+	var seen = {};
+	var materials = doc.querySelectorAll(
+		'#supplementary-materials .core-supplementary-material'
+	);
+	for (let material of materials) {
+		let link = material.querySelector(
+			'.core-link a[href][download], a[href*="/doi/suppl/"][href]'
+		);
+		if (!link || !link.href) continue;
+
+		let url = link.href.replace(/#.*/, '');
+		if (seen[url]) continue;
+		seen[url] = true;
+
+		let description = material.querySelector('.core-description');
+		let title = description && Array.from(description.children)
+			.map(child => ZU.trimInternal(child.textContent))
+			.filter(Boolean)
+			.join('; ');
+		title = title || link.getAttribute('download') || 'Supplementary Data';
+
+		let filename = link.getAttribute('download') || url;
+		let extension = filename.match(/\.([a-z0-9]+)(?:[?#].*)?$/i);
+		let mimeType = extension && scienceSupplementaryMimeTypes[extension[1].toLowerCase()];
+		let attachment = {
+			title: title,
+			url: url
+		};
+		if (mimeType) attachment.mimeType = mimeType;
+		if (attachAsLink || !mimeType) attachment.snapshot = false;
+		attachments.push(attachment);
+	}
+
+	return attachments;
+}
+
 function doWeb(doc, url) {
 	if (detectWeb(doc, url) == "multiple") {
 		var extras = {};
@@ -385,6 +440,18 @@ function scrape(doc, url, extras) {
 						title: "Full Text PDF",
 						mimeType: "application/pdf"
 					});
+				}
+
+				if (Z.getHiddenPref && Z.getHiddenPref('attachSupplementary')) {
+					try {
+						item.attachments.push(...getScienceSupplementaryAttachments(
+							doc, Z.getHiddenPref('supplementaryAsLink'), url
+						));
+					}
+					catch (e) {
+						Z.debug('Atypon: could not attach Science supplementary files.');
+						Z.debug(e);
+					}
 				}
 				
 				item.libraryCatalog = url.replace(/^https?:\/\/(?:www\.)?/, '')

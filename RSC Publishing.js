@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsb",
-	"lastUpdated": "2021-06-22 14:44:14"
+	"lastUpdated": "2026-08-08 19:45:00"
 }
 
 /*
@@ -51,7 +51,9 @@ function detectWeb(doc, url) {
 		return 'multiple';
 	}
 	// apparently URLs sometimes have upper case as in /Content/ArticleLanding/
-	if (url.search(/\/content\/articlelanding\//i) != -1 && ZU.xpathText(doc, '//meta[@name="citation_title"]/@content')) {
+	if ((/\/content\/articlelanding\//i.test(url)
+		|| /\/[a-z]{2}\/article\/doi\/10\.1039\//i.test(url))
+		&& ZU.xpathText(doc, '//meta[@name="citation_title"]/@content')) {
 		return 'journalArticle';
 	}
 
@@ -60,6 +62,74 @@ function detectWeb(doc, url) {
 	}
 
 	return false;
+}
+
+var suppTypeMap = {
+	pdf: 'application/pdf',
+	doc: 'application/msword',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	xls: 'application/vnd.ms-excel',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	csv: 'text/csv',
+	txt: 'text/plain',
+	zip: 'application/zip',
+	mp4: 'video/mp4'
+};
+
+function getSupplementaryMimeType(link, title) {
+	// Current RSC files use routes such as
+	// /ma/article-supplement/1287895/mp4/d6ma00514d1_suppl/ without a
+	// filename extension, so prefer their explicit format path component.
+	var type = link.href.match(/\/article-supplement\/[^/]+\/([a-z0-9]+)\//i);
+	if (type) type = suppTypeMap[type[1].toLowerCase()];
+	if (type) return type;
+
+	var fileName = link.getAttribute('download')
+		|| link.href.replace(/[?#].*$/, '');
+	var extension = fileName && fileName.match(/\.([a-z0-9]+)$/i);
+	if (extension) {
+		type = suppTypeMap[extension[1].toLowerCase()];
+		if (type) return type;
+	}
+
+	var textType = title.match(/\b(pdf|docx?|xlsx?|csv|txt|zip|mp4)\b/i);
+	return textType && suppTypeMap[textType[1].toLowerCase()];
+}
+
+function getSupplementaryAttachments(doc, attachAsLink) {
+	var attachments = [];
+	var seen = {};
+	var links = doc.querySelectorAll([
+		'.widget-ArticleDataSupplements a[href*="/article-supplement/"]',
+		'a.js-download-file-gtm-datalayer-event[href*="/article-supplement/"]',
+		'.list__item-link[href]'
+	].join(', '));
+
+	for (var i = 0; i < links.length; i++) {
+		var link = links[i];
+		var attachmentURL = link.href.replace(/#.*$/, '');
+		if (!attachmentURL || seen[attachmentURL]) continue;
+
+		var container = link.closest && link.closest('.dataSuppLink');
+		var title = ZU.trimInternal((container || link).textContent);
+		// The legacy list selector is broad enough to include non-SI links.
+		if (!/\/article-supplement\//i.test(attachmentURL)
+			&& !/(?:supplementary|supporting|electronic supplementary|\bESI\b)/i.test(title)) {
+			continue;
+		}
+		seen[attachmentURL] = true;
+
+		var mimeType = getSupplementaryMimeType(link, title);
+		var attachment = {
+			title: title || 'Supplementary file',
+			url: attachmentURL,
+			snapshot: !!(!attachAsLink && mimeType)
+		};
+		if (mimeType) attachment.mimeType = mimeType;
+		attachments.push(attachment);
+	}
+
+	return attachments;
 }
 
 function scrape(doc, url, type) {
@@ -78,16 +148,13 @@ function scrape(doc, url, type) {
 		if (item.date) {
 			item.date = ZU.strToISO(item.date);
 		}
-		
-		for (let link of doc.querySelectorAll('.list__item-link')) {
-			if (link.textContent.includes('Supplementary information')) {
-				item.attachments.push({
-					url: link.href,
-					title: 'Supplementary Information PDF',
-					mimeType: 'application/pdf'
-				});
-				break;
-			}
+
+		// Preserve Embedded Metadata's main-PDF attachment. Supplementary files
+		// are additive and obey the shared Connector/Desktop preferences.
+		if (Z.getHiddenPref && Z.getHiddenPref('attachSupplementary')) {
+			var attachments = getSupplementaryAttachments(
+				doc, Z.getHiddenPref('supplementaryAsLink'));
+			item.attachments = item.attachments.concat(attachments);
 		}
 
 		item.complete();
@@ -179,10 +246,6 @@ var testCases = [
 					{
 						"title": "Snapshot",
 						"mimeType": "text/html"
-					},
-					{
-						"title": "Supplementary Information PDF",
-						"mimeType": "application/pdf"
 					}
 				],
 				"tags": [],
